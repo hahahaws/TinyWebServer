@@ -104,29 +104,42 @@ void WebServer::eventListen()
 {
     //网络编程基础步骤
     m_listenfd = socket(PF_INET, SOCK_STREAM, 0);
+    //如果它的条件返回错误，则终止程序执行
     assert(m_listenfd >= 0);
+
+    //TCP连接断开的时候调用closesocket函数，有优雅的断开和强制断开两种方式
 
     //优雅关闭连接
     if (0 == m_OPT_LINGER)
     {
+        //底层会将未发送完的数据发送完成后再释放资源，也就是优雅的退出
         struct linger tmp = {0, 1};
         setsockopt(m_listenfd, SOL_SOCKET, SO_LINGER, &tmp, sizeof(tmp));
     }
     else if (1 == m_OPT_LINGER)
     {
+
+        //这种方式下，在调用closesocket的时候不会立刻返回，内核会延迟一段时间，这个时间就由l_linger得值来决定。
+        //如果超时时间到达之前，发送完未发送的数据(包括FIN包)并得到另一端的确认，closesocket会返回正确，socket描述符优雅性退出。
+        //否则，closesocket会直接返回 错误值，未发送数据丢失，socket描述符被强制性退出。需要注意的时，如果socket描述符被设置为非堵塞型，则closesocket会直接返回值。
         struct linger tmp = {1, 1};
         setsockopt(m_listenfd, SOL_SOCKET, SO_LINGER, &tmp, sizeof(tmp));
     }
 
     int ret = 0;
     struct sockaddr_in address;
-    bzero(&address, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_ANY);
-    address.sin_port = htons(m_port);
+    // bzero() 会将内存块（字符串）的前n个字节清零;
+    // s为内存（字符串）指针，n 为需要清零的字节数。
+    // 在网络编程中会经常用到。
+    bzero(&address, sizeof(address));//使用 bzero 函数将 address 结构体清零，确保初始状态干净。
+    address.sin_family = AF_INET;//设置 address 结构体的地址族为 IPv4 (AF_INET)
+    address.sin_addr.s_addr = htonl(INADDR_ANY);//将 address 结构体的 IP 地址设置为任意可用接口的地址，并转换为网络字节序。
+    address.sin_port = htons(m_port);//将 address 结构体的端口号设置为指定的端口号 m_port，并转换为网络字节序。
 
     int flag = 1;
+    //允许重用本地地址和端口
     setsockopt(m_listenfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+    //传统绑定步骤
     ret = bind(m_listenfd, (struct sockaddr *)&address, sizeof(address));
     assert(ret >= 0);
     ret = listen(m_listenfd, 5);
@@ -135,17 +148,18 @@ void WebServer::eventListen()
     utils.init(TIMESLOT);
 
     //epoll创建内核事件表
-    epoll_event events[MAX_EVENT_NUMBER];
-    m_epollfd = epoll_create(5);
+    epoll_event events[MAX_EVENT_NUMBER];/* 用于存储epoll事件表中就绪事件的event数组 */
+    m_epollfd = epoll_create(5);/* 创建一个额外的文件描述符来唯一标识内核中的epoll事件表 */
     assert(m_epollfd != -1);
 
+    /* 主线程往epoll内核事件表中注册监听socket事件，当listen到新的客户连接时，listenfd变为就绪事件 */
     utils.addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);
     http_conn::m_epollfd = m_epollfd;
 
     ret = socketpair(PF_UNIX, SOCK_STREAM, 0, m_pipefd);
     assert(ret != -1);
-    utils.setnonblocking(m_pipefd[1]);
-    utils.addfd(m_epollfd, m_pipefd[0], false, 0);
+    utils.setnonblocking(m_pipefd[1]);//将m_pipefd[1]（写端）设置为非阻塞模式，以便在写数据时不会阻塞
+    utils.addfd(m_epollfd, m_pipefd[0], false, 0);//将m_pipefd[0]（读端）添加到epoll实例中，并设置为LT模式，以便在读端有数据可读时，epoll能够通知程序进行处理
 
     utils.addsig(SIGPIPE, SIG_IGN);
     utils.addsig(SIGALRM, utils.sig_handler, false);
@@ -162,16 +176,23 @@ void WebServer::timer(int connfd, struct sockaddr_in client_address)
 {
     users[connfd].init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
 
-    //初始化client_data数据
-    //创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
+    //初始化客户端连接地址
     users_timer[connfd].address = client_address;
     users_timer[connfd].sockfd = connfd;
+
+    //创建定时器临时变量
     util_timer *timer = new util_timer;
+    //设置定时器对应的连接资源
     timer->user_data = &users_timer[connfd];
+    //设置回调函数
     timer->cb_func = cb_func;
+
     time_t cur = time(NULL);
+    //设置绝对超时时间
     timer->expire = cur + 3 * TIMESLOT;
+    //创建该连接对应的定时器，初始化为前述临时变量
     users_timer[connfd].timer = timer;
+    //将该定时器添加到链表中
     utils.m_timer_lst.add_timer(timer);
 }
 
@@ -199,10 +220,12 @@ void WebServer::deal_timer(util_timer *timer, int sockfd)
 
 bool WebServer::dealclientdata()
 {
+    //初始化客户端连接地址
     struct sockaddr_in client_address;
     socklen_t client_addrlength = sizeof(client_address);
     if (0 == m_LISTENTrigmode)
     {
+        //该连接分配的文件描述符
         int connfd = accept(m_listenfd, (struct sockaddr *)&client_address, &client_addrlength);
         if (connfd < 0)
         {
@@ -246,6 +269,9 @@ bool WebServer::dealwithsignal(bool &timeout, bool &stop_server)
     int ret = 0;
     int sig;
     char signals[1024];
+
+    //从管道读端读出信号值，成功返回字节数，失败返回-1
+    //正常情况下，这里的ret返回值总是1，只有14和15两个ASCII码对应的字符
     ret = recv(m_pipefd[0], signals, sizeof(signals), 0);
     if (ret == -1)
     {
@@ -257,10 +283,13 @@ bool WebServer::dealwithsignal(bool &timeout, bool &stop_server)
     }
     else
     {
+        //处理信号值对应的逻辑
         for (int i = 0; i < ret; ++i)
         {
+            //这里面明明是字符
             switch (signals[i])
             {
+            //这里是整型
             case SIGALRM:
             {
                 timeout = true;
@@ -381,23 +410,28 @@ void WebServer::eventLoop()
 
     while (!stop_server)
     {
-        int number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);
+        //返回值的具体数值就是发生了事件的socket数量。例如，如果返回3，就表示有3个socket上有事件发生。
+        //当 epoll_wait 返回时，它会将就绪的文件描述符的信息填充到 events 数组中
+        //0： 表示在指定的超时时间内，没有任何事件发生
+        int number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);//events是数组名，指向epoll_event结构体的指针。
+        //-1： 表示调用出错，通常情况下，可以通过errno获取错误码来了解出错的原因。
         if (number < 0 && errno != EINTR)
         {
             LOG_ERROR("%s", "epoll failure");
             break;
         }
-
+        //number表示number个文件描述符上发生了事件。不一定意味着有number个新的连接请求，可以是已连接客户端的数据可读/可写等等
         for (int i = 0; i < number; i++)
         {
             int sockfd = events[i].data.fd;
 
             //处理新到的客户连接
+            //如果同一时刻有几个fd都是请求新连接，那么这几个fd相等，而且等于m_listenfd
             if (sockfd == m_listenfd)
             {
                 bool flag = dealclientdata();
                 if (false == flag)
-                    continue;
+                    continue;//当前处理失败的直接跳过，但是这个fd仍然保持就绪状态，下一次epoll_wait后仍然在events中
             }
             else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
             {
@@ -406,6 +440,7 @@ void WebServer::eventLoop()
                 deal_timer(timer, sockfd);
             }
             //处理信号
+            //管道读端对应文件描述符发生读事件
             else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN))
             {
                 bool flag = dealwithsignal(timeout, stop_server);
