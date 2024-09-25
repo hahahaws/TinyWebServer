@@ -146,7 +146,7 @@ public:
         m_mutex.unlock();
         return true;
     }
-    //pop时,如果当前队列没有元素,将会等待条件变量.
+    //pop时,如果当前队列没有元素,将会等待条件变量
     bool pop(T &item)
     {
 
